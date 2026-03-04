@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Project generated outputs
+processed/**
+pdf_archive/**
+
