@@ -4,7 +4,9 @@ Use this to make print-ready proxy sheets with borders + cut marks.
 
 Need full details? See `IN_DEPTH.md`.
 
-<img width="160" height="148" alt="Image" src="https://github.com/user-attachments/assets/be158778-b58a-4743-92c1-6547c2995ca3" /> Support: [buymeacoffee.com/dinnermonster](https://buymeacoffee.com/dinnermonster)
+<img width="160" height="148" alt="Image" src="https://github.com/user-attachments/assets/be158778-b58a-4743-92c1-6547c2995ca3" /> 
+
+Support: [buymeacoffee.com/dinnermonster](https://buymeacoffee.com/dinnermonster)
 
 ## macOS (recommended)
 
