@@ -53,6 +53,7 @@ def base_args(tmp: Path, **overrides):
         "singles_mode": False,
         "single_suffix": "-single.pdf",
         "singles_batch_size": 8,
+        "single_max_side_px": 4000,
         "output_pdf": None,
         "input_pdf": None,
     }
@@ -181,7 +182,7 @@ class SinglesModeTests(unittest.TestCase):
             colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (200, 200, 0)] * 2
             images = [Image.new("RGB", (120 + i, 180 + i), colors[i]) for i in range(8)]
 
-            def fake_render(_pdf, _dpi, _workdir, prefix):
+            def fake_render(_pdf, _dpi, _workdir, prefix, _max_side_px):
                 idx = int(prefix.split("-")[-1])
                 return images[idx]
 

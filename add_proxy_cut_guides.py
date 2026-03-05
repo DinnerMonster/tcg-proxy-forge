@@ -97,8 +97,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--watch-dir",
         type=Path,
-        default=Path("./pdf/look-for-names"),
-        help="Directory to watch when --watch is set (default: ./pdf/look-for-names)",
+        default=Path("./pdf"),
+        help="Directory to watch when --watch is set (default: ./pdf)",
     )
     parser.add_argument(
         "--watch-interval",
@@ -140,6 +140,12 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="How many single PDFs to consume per 4x4 sheet (default: 8)",
     )
+    parser.add_argument(
+        "--single-max-side-px",
+        type=int,
+        default=4000,
+        help="Max rendered long-edge pixels for singles inputs to avoid memory spikes (default: 4000)",
+    )
     args = parser.parse_args()
     if args.rows < 1 or args.cols < 1:
         parser.error("--rows and --cols must be >= 1")
@@ -151,6 +157,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--watch-interval must be > 0")
     if args.singles_batch_size < 1:
         parser.error("--singles-batch-size must be >= 1")
+    if args.single_max_side_px < 256:
+        parser.error("--single-max-side-px must be >= 256")
     if args.singles_mode:
         if args.input_pdf is not None:
             parser.error("Do not pass input_pdf when using --singles-mode")
@@ -381,6 +389,7 @@ def print_settings_block(args: argparse.Namespace) -> None:
     kv("Cut gray", str(args.cut_mark_gray))
     kv("Threshold", str(args.content_threshold))
     kv("Edge marks", str(args.page_edge_marks))
+    kv("Single max px", str(args.single_max_side_px))
 
 
 def default_output_path(input_pdf: Path, args: argparse.Namespace) -> Path:
@@ -410,9 +419,53 @@ def archive_input_pdf(input_pdf: Path, args: argparse.Namespace) -> Path:
     return target
 
 
-def render_single_pdf_to_image(input_pdf: Path, dpi: int, workdir: Path, prefix: str) -> Image.Image:
+def get_pdf_page_size_pts(input_pdf: Path) -> tuple[float, float]:
+    proc = subprocess.run(["pdfinfo", str(input_pdf)], capture_output=True, text=True)
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip()
+        raise RuntimeError(f"pdfinfo failed for {input_pdf.name}: {err}")
+    for line in proc.stdout.splitlines():
+        if line.startswith("Page size:"):
+            match = re.search(r"Page size:\s*([0-9.]+)\s*x\s*([0-9.]+)\s*pts", line)
+            if match:
+                return (float(match.group(1)), float(match.group(2)))
+    raise RuntimeError(f"Could not read page size for {input_pdf.name}")
+
+
+def choose_single_render_dpi(input_pdf: Path, target_dpi: int, max_side_px: int) -> int:
+    page_w_pts, page_h_pts = get_pdf_page_size_pts(input_pdf)
+    long_side_pts = max(page_w_pts, page_h_pts)
+    max_allowed_dpi = int(max_side_px * 72.0 / long_side_pts)
+    return max(1, min(target_dpi, max_allowed_dpi))
+
+
+def run_single_render_cmd(cmd: list[str], output_png: Path) -> tuple[bool, str]:
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0 and output_png.exists():
+        return (True, "")
+    err = (proc.stderr or "").strip()
+    out = (proc.stdout or "").strip()
+    return (False, err if err else out)
+
+
+def render_single_pdf_to_image(
+    input_pdf: Path,
+    dpi: int,
+    workdir: Path,
+    prefix: str,
+    max_side_px: int,
+) -> Image.Image:
+    effective_dpi = choose_single_render_dpi(input_pdf, dpi, max_side_px)
+    if effective_dpi < dpi:
+        event(
+            "INFO",
+            f"{input_pdf.name}: lowering singles render DPI {dpi} -> {effective_dpi} (max side {max_side_px}px)",
+            "36",
+        )
+
     out_prefix = workdir / prefix
-    cmd = [
+    png_path = out_prefix.with_suffix(".png")
+    pdftoppm_cmd = [
         "pdftoppm",
         "-png",
         "-singlefile",
@@ -421,14 +474,36 @@ def render_single_pdf_to_image(input_pdf: Path, dpi: int, workdir: Path, prefix:
         "-l",
         "1",
         "-r",
-        str(dpi),
+        str(effective_dpi),
         str(input_pdf),
         str(out_prefix),
     ]
-    subprocess.run(cmd, check=True)
-    png_path = out_prefix.with_suffix(".png")
-    if not png_path.exists():
-        raise RuntimeError(f"Failed to render single PDF: {input_pdf}")
+    ok, message = run_single_render_cmd(pdftoppm_cmd, png_path)
+    if not ok:
+        pdftocairo = shutil.which("pdftocairo")
+        if pdftocairo:
+            pdftocairo_cmd = [
+                pdftocairo,
+                "-png",
+                "-singlefile",
+                "-f",
+                "1",
+                "-l",
+                "1",
+                "-r",
+                str(effective_dpi),
+                str(input_pdf),
+                str(out_prefix),
+            ]
+            ok2, message2 = run_single_render_cmd(pdftocairo_cmd, png_path)
+            if not ok2:
+                raise RuntimeError(
+                    f"{input_pdf.name}: pdftoppm failed ({message[:160]}) and pdftocairo failed ({message2[:160]})"
+                )
+            event("INFO", f"{input_pdf.name}: pdftoppm failed, used pdftocairo fallback", "36")
+        else:
+            raise RuntimeError(f"{input_pdf.name}: pdftoppm failed ({message[:300]})")
+
     with Image.open(png_path) as img:
         return img.convert("RGB")
 
@@ -483,7 +558,13 @@ def process_singles_batch(single_pdfs: list[Path], args: argparse.Namespace) -> 
     with tempfile.TemporaryDirectory(prefix="proxy-singles-") as temp_dir:
         temp_path = Path(temp_dir)
         for idx, single_pdf in enumerate(single_pdfs):
-            card_img = render_single_pdf_to_image(single_pdf, args.dpi, temp_path, f"single-{idx}")
+            card_img = render_single_pdf_to_image(
+                single_pdf,
+                args.dpi,
+                temp_path,
+                f"single-{idx}",
+                args.single_max_side_px,
+            )
             bbox = detect_content_bbox(card_img, args.content_threshold)
             cards.append(card_img.crop(bbox))
 

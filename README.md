@@ -17,7 +17,7 @@ chmod +x ./run.sh
 ./run.sh ./examples/blank-example.pdf
 ```
 
-Watch mode (auto-process PDFs in `./pdf/look-for-names`):
+Watch mode (auto-process PDFs in `./pdf`):
 
 ```bash
 ./run.sh --watch
@@ -58,7 +58,7 @@ py -3 .\add_proxy_cut_guides.py --singles-mode --watch
 
 ## Where files go
 
-- Input watch folder: `./pdf/look-for-names`
+- Input watch folder: `./pdf`
 - Processed output: `./processed`
 - Processed source PDFs are moved to: `./pdf_archive`
 

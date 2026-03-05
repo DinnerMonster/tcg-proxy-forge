@@ -37,7 +37,7 @@ python3 add_proxy_cut_guides.py --watch
 ```
 
 Default watch folder:
-- `./pdf/look-for-names`
+- `./pdf`
 
 ### 3) Singles mode
 
@@ -107,7 +107,7 @@ Watch mode skips an input when its expected processed filename already exists in
 ### Mode options
 
 - `--watch`
-- `--watch-dir` (default: `./pdf/look-for-names`)
+- `--watch-dir` (default: `./pdf`)
 - `--watch-interval` (default: `3.0`)
 - `--watch-recursive`
 
@@ -121,6 +121,7 @@ Watch mode skips an input when its expected processed filename already exists in
 - `--singles-mode`
 - `--single-suffix` (default: `-single.pdf`)
 - `--singles-batch-size` (default: `8`)
+- `--single-max-side-px` (default: `4000`) limits singles render size to avoid huge-memory renders
 
 ## Common recipes
 
@@ -156,7 +157,7 @@ python3 add_proxy_cut_guides.py ./sheet.pdf --no-page-edge-marks
 
 ```bash
 python3 add_proxy_cut_guides.py --singles-mode --watch \
-  --watch-dir ./pdf/look-for-names \
+  --watch-dir ./pdf \
   --single-suffix _single.pdf \
   --singles-batch-size 8
 ```
@@ -214,3 +215,15 @@ Check:
 ### File was skipped
 
 Expected processed output already exists in `--processed-dir`.
+
+### `Bogus memory allocation size` in singles mode
+
+This usually means a source PDF has a very large page size and was too expensive to render at your current DPI.
+
+Use/adjust:
+
+```bash
+--single-max-side-px 4000
+```
+
+Lower values reduce memory usage further.
