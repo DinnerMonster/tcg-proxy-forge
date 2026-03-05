@@ -128,6 +128,11 @@ class HelpersTests(unittest.TestCase):
             found = SCRIPT.iter_single_pdfs(tmp, recursive=True, suffix="-single.pdf")
             self.assertEqual([p.name for p in found], ["keep-single.pdf"])
 
+    def test_choose_single_render_dpi_lowers_for_large_page(self):
+        with mock.patch.object(SCRIPT, "get_pdf_page_size_pts", return_value=(4032.0, 3024.0)):
+            dpi = SCRIPT.choose_single_render_dpi(Path("big.pdf"), target_dpi=600, max_side_px=4000)
+        self.assertEqual(dpi, 71)
+
 
 class SinglesModeTests(unittest.TestCase):
     def test_singles_mode_once_waits_for_minimum_batch(self):
@@ -212,6 +217,53 @@ class SinglesModeTests(unittest.TestCase):
             args = base_args(tmp)
             with self.assertRaises(ValueError):
                 SCRIPT.process_singles_batch([], args)
+
+    def test_process_singles_batch_does_not_repeat_when_batch_is_less_than_grid(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            processed_dir = tmp / "processed"
+            processed_dir.mkdir()
+            archive_dir = tmp / "archive"
+            archive_dir.mkdir()
+
+            singles = []
+            for i in range(7):
+                p = tmp / f"card{i}-single.pdf"
+                p.write_bytes(b"x")
+                singles.append(p)
+
+            args = base_args(
+                tmp,
+                dpi=72,
+                processed_dir=processed_dir,
+                archive_dir=archive_dir,
+                singles_batch_size=7,
+            )
+
+            def fake_render(_pdf, _dpi, _workdir, _prefix, _max_side_px):
+                return Image.new("RGB", (120, 180), (255, 0, 0))
+
+            archived_inputs = []
+
+            def fake_archive(input_pdf, _args):
+                archived_inputs.append(input_pdf)
+                return archive_dir / input_pdf.name
+
+            out_path = processed_dir / "out-7.pdf"
+            with (
+                mock.patch.object(SCRIPT, "render_single_pdf_to_image", side_effect=fake_render),
+                mock.patch.object(SCRIPT, "archive_input_pdf", side_effect=fake_archive),
+                mock.patch.object(SCRIPT, "singles_output_path", return_value=out_path),
+                mock.patch.object(SCRIPT, "event"),
+                mock.patch.object(SCRIPT, "kv"),
+                mock.patch.object(SCRIPT, "fit_card_to_cell", wraps=SCRIPT.fit_card_to_cell) as fit_mock,
+            ):
+                result = SCRIPT.process_singles_batch(singles, args)
+
+            self.assertEqual(result, out_path)
+            self.assertTrue(out_path.exists())
+            self.assertEqual(len(archived_inputs), 7)
+            self.assertEqual(fit_mock.call_count, 7)
 
 
 class ProcessPdfTests(unittest.TestCase):

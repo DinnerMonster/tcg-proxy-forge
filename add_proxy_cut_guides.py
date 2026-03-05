@@ -23,7 +23,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 
 def parse_args() -> argparse.Namespace:
@@ -379,8 +379,10 @@ def settings_summary(args: argparse.Namespace) -> str:
     )
 
 
-def print_settings_block(args: argparse.Namespace) -> None:
-    kv("Rows x Cols", f"{args.rows} x {args.cols}")
+def print_settings_block(args: argparse.Namespace, rows: int | None = None, cols: int | None = None) -> None:
+    eff_rows = args.rows if rows is None else rows
+    eff_cols = args.cols if cols is None else cols
+    kv("Rows x Cols", f"{eff_rows} x {eff_cols}")
     kv("DPI", str(args.dpi))
     kv("Gutter (in)", str(args.gutter_in))
     kv("Border (pt)", str(args.border_pt))
@@ -510,13 +512,13 @@ def render_single_pdf_to_image(
 
 def fit_card_to_cell(card: Image.Image, cell_w: int, cell_h: int) -> Image.Image:
     resampling = getattr(Image, "Resampling", Image)
-    resized = card.copy()
-    resized.thumbnail((cell_w, cell_h), resampling.LANCZOS)
-    canvas = Image.new("RGB", (cell_w, cell_h), "white")
-    x = (cell_w - resized.width) // 2
-    y = (cell_h - resized.height) // 2
-    canvas.paste(resized, (x, y))
-    return canvas
+    # Fill the full cell so cards line up tightly with cut/border guides.
+    return ImageOps.fit(
+        card,
+        (cell_w, cell_h),
+        method=resampling.LANCZOS,
+        centering=(0.5, 0.5),
+    )
 
 
 def iter_single_pdfs(watch_dir: Path, recursive: bool, suffix: str) -> list[Path]:
@@ -551,8 +553,25 @@ def process_singles_batch(single_pdfs: list[Path], args: argparse.Namespace) -> 
     for pdf in single_pdfs:
         kv("Input single", pdf.name)
 
+    rows = 4
+    cols = 4
+    total_slots = rows * cols
     page_w = int(round(11 * args.dpi))
     page_h = int(round(8.5 * args.dpi))
+    gutter_px = max(0, round(args.gutter_in * args.dpi))
+    border_px = max(1, round(args.border_pt * args.dpi / 72))
+    tick_len_px = max(2, round(args.cut_mark_len_in * args.dpi))
+    tick_w_px = max(1, round(args.cut_mark_pt * args.dpi / 72))
+    black = (0, 0, 0)
+    gray = (args.cut_mark_gray, args.cut_mark_gray, args.cut_mark_gray)
+
+    cell_w = (page_w - gutter_px * (cols - 1)) // cols
+    cell_h = (page_h - gutter_px * (rows - 1)) // rows
+    if cell_w <= 0 or cell_h <= 0:
+        raise ValueError(
+            "Grid does not fit on page with current singles settings. "
+            "Use smaller --gutter-in or lower --dpi."
+        )
 
     cards: list[Image.Image] = []
     with tempfile.TemporaryDirectory(prefix="proxy-singles-") as temp_dir:
@@ -568,46 +587,76 @@ def process_singles_batch(single_pdfs: list[Path], args: argparse.Namespace) -> 
             bbox = detect_content_bbox(card_img, args.content_threshold)
             cards.append(card_img.crop(bbox))
 
-    max_w = max(card.width for card in cards)
-    max_h = max(card.height for card in cards)
-    scale = min(page_w / (4 * max_w), page_h / (4 * max_h), 1.0)
-    cell_w = max(1, int(max_w * scale))
-    cell_h = max(1, int(max_h * scale))
-
-    prepared_cards = [fit_card_to_cell(card, cell_w, cell_h) for card in cards]
-
-    # For 8 singles, each card is duplicated once to fill 16 slots.
-    if len(prepared_cards) == 8:
-        grid_cards = [card for card in prepared_cards for _ in (0, 1)]
-    else:
-        grid_cards = []
-        idx = 0
-        while len(grid_cards) < 16:
-            grid_cards.append(prepared_cards[idx % len(prepared_cards)])
-            idx += 1
-    grid_cards = grid_cards[:16]
-
-    source_page = Image.new("RGB", (page_w, page_h), "white")
-    grid_w = cell_w * 4
-    grid_h = cell_h * 4
+    out_page = Image.new("RGB", (page_w, page_h), "white")
+    draw = ImageDraw.Draw(out_page)
+    grid_w = cell_w * cols + gutter_px * (cols - 1)
+    grid_h = cell_h * rows + gutter_px * (rows - 1)
     grid_left = (page_w - grid_w) // 2
     grid_top = (page_h - grid_h) // 2
+    grid_right = grid_left + grid_w
+    grid_bottom = grid_top + grid_h
 
-    for idx, card in enumerate(grid_cards):
-        row = idx // 4
-        col = idx % 4
-        x = grid_left + col * cell_w
-        y = grid_top + row * cell_h
-        source_page.paste(card, (x, y))
+    # Fill one set only: each input occupies one slot, remaining slots stay blank.
+    for idx in range(total_slots):
+        row = idx // cols
+        col = idx % cols
+        x = grid_left + col * (cell_w + gutter_px)
+        y = grid_top + row * (cell_h + gutter_px)
+        if idx < len(cards):
+            card = fit_card_to_cell(cards[idx], cell_w, cell_h)
+            out_page.paste(card, (x, y))
+        draw.rectangle((x, y, x + cell_w - 1, y + cell_h - 1), outline=black, width=border_px)
 
-    sheet_args = argparse.Namespace(**vars(args))
-    sheet_args.rows = 4
-    sheet_args.cols = 4
-    final_page = compose_page(source_page, sheet_args)
+    col_widths = [cell_w] * cols
+    row_heights = [cell_h] * rows
+
+    internal_cut_xs: list[int] = []
+    for c in range(1, cols):
+        cut_x = int(round(grid_left + sum(col_widths[:c]) + (c - 0.5) * gutter_px))
+        internal_cut_xs.append(cut_x)
+        draw.line(
+            (cut_x, grid_top - tick_len_px // 2, cut_x, grid_top + tick_len_px // 2),
+            fill=gray,
+            width=tick_w_px,
+        )
+        draw.line(
+            (cut_x, grid_bottom - tick_len_px // 2, cut_x, grid_bottom + tick_len_px // 2),
+            fill=gray,
+            width=tick_w_px,
+        )
+
+    internal_cut_ys: list[int] = []
+    for r in range(1, rows):
+        cut_y = int(round(grid_top + sum(row_heights[:r]) + (r - 0.5) * gutter_px))
+        internal_cut_ys.append(cut_y)
+        draw.line(
+            (grid_left - tick_len_px // 2, cut_y, grid_left + tick_len_px // 2, cut_y),
+            fill=gray,
+            width=tick_w_px,
+        )
+        draw.line(
+            (grid_right - tick_len_px // 2, cut_y, grid_right + tick_len_px // 2, cut_y),
+            fill=gray,
+            width=tick_w_px,
+        )
+
+    if args.page_edge_marks:
+        vertical_cuts = [grid_left] + internal_cut_xs + [grid_right]
+        horizontal_cuts = [grid_top] + internal_cut_ys + [grid_bottom]
+
+        for cut_x in vertical_cuts:
+            x = max(0, min(page_w - 1, cut_x))
+            draw.line((x, 0, x, min(page_h - 1, tick_len_px - 1)), fill=gray, width=tick_w_px)
+            draw.line((x, max(0, page_h - tick_len_px), x, page_h - 1), fill=gray, width=tick_w_px)
+
+        for cut_y in horizontal_cuts:
+            y = max(0, min(page_h - 1, cut_y))
+            draw.line((0, y, min(page_w - 1, tick_len_px - 1), y), fill=gray, width=tick_w_px)
+            draw.line((max(0, page_w - tick_len_px), y, page_w - 1, y), fill=gray, width=tick_w_px)
 
     output_pdf = singles_output_path(args)
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
-    final_page.save(output_pdf, format="PDF", resolution=float(args.dpi))
+    out_page.save(output_pdf, format="PDF", resolution=float(args.dpi))
     event("DONE", f"Singles sheet -> {output_pdf.name}", "1;32")
 
     for single_pdf in single_pdfs:
@@ -654,7 +703,7 @@ def watch_singles_mode(args: argparse.Namespace) -> None:
     kv("Interval", f"{args.watch_interval:.1f}s")
     kv("Recursive", str(args.watch_recursive))
     print(style("Settings:", "1;34"), flush=True)
-    print_settings_block(args)
+    print_settings_block(args, rows=4, cols=4)
 
     last_count: int | None = None
     while True:
@@ -782,7 +831,7 @@ def main() -> None:
                 kv("Processed dir", str(args.processed_dir.resolve()))
                 kv("Archive dir", str(args.archive_dir.resolve()))
                 print(style("Settings:", "1;34"), flush=True)
-                print_settings_block(args)
+                print_settings_block(args, rows=4, cols=4)
                 singles_mode_once(args)
         except KeyboardInterrupt:
             event("STOP", "Singles watcher stopped.", "1;35")
